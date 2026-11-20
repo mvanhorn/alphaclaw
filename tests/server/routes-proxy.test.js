@@ -25,6 +25,8 @@ const createApp = ({
   globalJsonLimit = "5mb",
   openAiCompatApiEnabled = true,
   openAiCompatApiThrottle = null,
+  web = vi.fn((_req, res) => res.status(502).json({ error: "Unexpected proxy" })),
+  requireAuth = (_req, _res, next) => next(),
 }) => {
   const app = express();
   const openAiParser = express.json({ limit: openAiJsonLimit });
@@ -37,15 +39,13 @@ const createApp = ({
   app.use(express.json({ limit: globalJsonLimit }));
   registerProxyRoutes({
     app,
-    proxy: {
-      web: vi.fn((_req, res) => res.status(502).json({ error: "Unexpected proxy" })),
-    },
+    proxy: { web },
     getGatewayUrl: () => gatewayUrl,
     getGatewayToken: () => gatewayToken,
     isOpenAiCompatApiEnabled: () => openAiCompatApiEnabled,
     openAiCompatApiThrottle,
-    SETUP_API_PREFIXES: [],
-    requireAuth: (_req, _res, next) => next(),
+    SETUP_API_PREFIXES: ["/api/chat"],
+    requireAuth,
     oauthCallbackMiddleware: (_req, res) => res.status(204).end(),
     webhookMiddleware: (_req, res) => res.status(204).end(),
   });
@@ -69,6 +69,32 @@ const createApiAuthThrottle = ({
     stateTtlMs: 180_000,
   }),
   getClientKey: () => clientKey,
+});
+
+it("forwards authenticated Control UI pages and assets while leaving local routes available", async () => {
+  const gatewayUrl = "http://localhost:18789";
+  const web = vi.fn((_req, res) => res.sendStatus(502));
+  const requireAuth = vi.fn((_req, _res, next) => next());
+  const app = createApp({ gatewayUrl, web, requireAuth });
+  for (const path of [
+    "/chat/main", "/chat/assets/control-ui-core.css?v=1", "/sessions/main",
+    "/openclaw/chat/main", "/assets/control-ui-core.css",
+  ]) {
+    await request(app).get(path).expect(502);
+    expect(web).toHaveBeenLastCalledWith(
+      expect.objectContaining({ url: path.replace(/^\/openclaw/, "") }),
+      expect.anything(),
+      { target: gatewayUrl },
+    );
+  }
+  for (const path of [
+    "/login.html", "/css/shell.css", "/api/chat/history", "/health", "/setup",
+    "/.well-known/acme-challenge/token",
+  ]) {
+    await request(app).get(path).expect(404);
+  }
+  expect(web).toHaveBeenCalledTimes(5);
+  expect(requireAuth).toHaveBeenCalledTimes(5);
 });
 
 describe("server/routes/proxy OpenAI compatibility", () => {
